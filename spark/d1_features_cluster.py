@@ -6,11 +6,15 @@ Builds per-language feature vectors from the monthly metrics, scales them,
 and runs KMeans (via Spark MLlib) to cluster languages by growth trajectory.
 
 Feature vector per language (5 dimensions):
-  avg_bytes_growth   — mean month-over-month % change in total_bytes
+  avg_repo_growth    — mean month-over-month % change in repo_count (real adoption growth)
   commit_volatility  — std(commit_count) / mean(commit_count)  (coefficient of variation)
-  bytes_range_ratio  — max(total_bytes) / min(total_bytes)     (overall growth magnitude)
-  avg_repo_count     — mean monthly repo_count                 (adoption breadth)
-  avg_commit_count   — mean monthly commit_count               (activity level)
+  repo_range_ratio   — max(repo_count) / min(repo_count)        (overall adoption magnitude)
+  avg_repo_count     — mean monthly repo_count                  (adoption breadth)
+  avg_commit_count   — mean monthly commit_count                (activity level)
+
+Note: bytes-based features were removed because Q1 (github_repos.languages) is a
+point-in-time snapshot, not a time series. Using bytes for MoM growth produced
+noise driven by which repos were active each month, not actual code-size change.
 
 Outputs:
   d1_clusters/        — (language, cluster, feature cols)
@@ -32,9 +36,9 @@ from pyspark.ml.feature import VectorAssembler, StandardScaler
 NUM_CLUSTERS = 6  # emerging / fast-growing / stable / declining / niche / legacy
 
 FEATURE_COLS = [
-    "avg_bytes_growth",
+    "avg_repo_growth",
     "commit_volatility",
-    "bytes_range_ratio",
+    "repo_range_ratio",
     "avg_repo_count",
     "avg_commit_count",
 ]
@@ -58,16 +62,18 @@ def main() -> None:
 
     df = spark.read.parquet(f"gs://{bucket}/processed/d1_monthly/")
 
-    # ── Month-over-month byte growth ──────────────────────────────────────────
+    # ── Month-over-month repo_count growth (real adoption signal) ─────────────
+    # repo_count is a true time series (distinct repos active each month),
+    # unlike total_bytes which is a static snapshot cross-joined onto months.
     w = Window.partitionBy("language").orderBy("year_month")
     df = (
         df
-        .withColumn("bytes_prev", F.lag("total_bytes", 1).over(w))
+        .withColumn("repo_count_prev", F.lag("repo_count", 1).over(w))
         .withColumn(
-            "bytes_growth",
+            "repo_growth",
             F.when(
-                F.col("bytes_prev") > 0,
-                (F.col("total_bytes") - F.col("bytes_prev")) / F.col("bytes_prev"),
+                F.col("repo_count_prev") > 0,
+                (F.col("repo_count") - F.col("repo_count_prev")) / F.col("repo_count_prev"),
             ).otherwise(None),
         )
     )
@@ -76,11 +82,11 @@ def main() -> None:
     features = (
         df.groupBy("language")
         .agg(
-            F.avg("bytes_growth").alias("avg_bytes_growth"),
+            F.avg("repo_growth").alias("avg_repo_growth"),
             F.stddev("commit_count").alias("_commit_std"),
             F.avg("commit_count").alias("avg_commit_count"),
-            F.max("total_bytes").alias("_max_bytes"),
-            F.min("total_bytes").alias("_min_bytes"),
+            F.max("repo_count").alias("_max_repo"),
+            F.min("repo_count").alias("_min_repo"),
             F.avg("repo_count").alias("avg_repo_count"),
         )
         .withColumn(
@@ -91,14 +97,14 @@ def main() -> None:
             ).otherwise(0.0),
         )
         .withColumn(
-            "bytes_range_ratio",
+            "repo_range_ratio",
             F.when(
-                F.col("_min_bytes") > 0,
-                F.col("_max_bytes") / F.col("_min_bytes"),
+                F.col("_min_repo") > 0,
+                F.col("_max_repo") / F.col("_min_repo"),
             ).otherwise(1.0),
         )
-        .drop("_commit_std", "_max_bytes", "_min_bytes")
-        .fillna(0.0, subset=["avg_bytes_growth", "commit_volatility"])
+        .drop("_commit_std", "_max_repo", "_min_repo")
+        .fillna(0.0, subset=["avg_repo_growth", "commit_volatility"])
     )
 
     # ── Assemble & scale ──────────────────────────────────────────────────────

@@ -16,6 +16,13 @@
 --   Rows where the email matches known bot patterns are excluded here to
 --   avoid inflating the graph with automated activity.
 --
+-- Timestamp alignment:
+--   Uses committer.date.seconds (same field as Q2) so that the year assigned
+--   to a commit is consistent across the language-trend pipeline (D1/D2) and
+--   the developer-graph pipeline (D4/D5).  The original author.time_sec would
+--   diverge for cherry-picked or rebased commits, misaligning the two halves
+--   of the analysis by potentially years.
+--
 -- Estimated scan: ~30–50 GB
 -- Run once, export result to GCS as Parquet.
 -- =============================================================================
@@ -25,7 +32,7 @@ SELECT
     repo_name,
     FORMAT_TIMESTAMP(
         '%Y',
-        TIMESTAMP_SECONDS(author.time_sec)
+        TIMESTAMP_SECONDS(committer.date.seconds)
     )                                                                   AS year,
     COUNT(DISTINCT commit)                                              AS commit_count
 FROM
@@ -42,9 +49,9 @@ WHERE
             r'\[bot\]|noreply|renovate|dependabot|github-actions|autobot|no-reply'
         )
 
-    -- Time window
-    AND author.time_sec IS NOT NULL
-    AND TIMESTAMP_SECONDS(author.time_sec)
+    -- Time window (committer.date.seconds aligns with Q2)
+    AND committer.date.seconds IS NOT NULL
+    AND TIMESTAMP_SECONDS(committer.date.seconds)
         BETWEEN TIMESTAMP('2015-01-01')
             AND TIMESTAMP(
                 DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 1 DAY)

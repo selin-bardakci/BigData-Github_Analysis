@@ -68,14 +68,38 @@ def _forecast_one(lang: str, df_lang: pd.DataFrame, ARIMACls) -> pd.DataFrame:
 
     df_lang = df_lang.sort_values("year_month").reset_index(drop=True)
     df_lang["ds"] = pd.to_datetime(df_lang["year_month"] + "-01")
+
+    # ── Fill gaps: reindex to a continuous monthly series ────────────────────
+    # ARIMA(p,d,q) assumes equally-spaced observations. Sparse data (months
+    # with no activity produce no row in d1_monthly) must be filled before
+    # fitting or the model treats adjacent rows as consecutive when they are not.
+    full_range = pd.date_range(
+        start=df_lang["ds"].min(), end=df_lang["ds"].max(), freq="MS"
+    )
+    n_gaps = len(full_range) - len(df_lang)
+    if n_gaps > 0:
+        print(f"  {lang}: filling {n_gaps} missing month(s) via linear interpolation")
+    df_lang = (
+        df_lang.set_index("ds")
+        .reindex(full_range)
+        .rename_axis("ds")
+        .reset_index()
+    )
+    df_lang["year_month"] = df_lang["ds"].dt.strftime("%Y-%m")
+    # Linear interpolation for interior gaps; edge NaNs (shouldn't exist after
+    # reindex between min/max) are filled with 0 as a safe fallback.
+    df_lang["repo_count"] = (
+        df_lang["repo_count"].interpolate(method="linear").fillna(0)
+    )
+
     y = df_lang["repo_count"].astype(float).values
-    n_hist = len(y)
 
     # ── ARIMA ─────────────────────────────────────────────────────────────────
     try:
         model    = ARIMACls(y, order=ARIMA_ORDER).fit()
         arima_fc = model.forecast(steps=FORECAST_MONTHS)
-    except Exception:
+    except Exception as exc:
+        print(f"  ARIMA fit failed for {lang}: {exc}")
         arima_fc = np.full(FORECAST_MONTHS, np.nan)
 
     # ── Forecast dates ────────────────────────────────────────────────────────
@@ -156,8 +180,19 @@ def main() -> None:
     results = []
     for lang in top_langs:
         subset = lang_pd[lang_pd["language"] == lang].copy()
-        if len(subset) < MIN_HISTORY:
-            print(f"  Skipping {lang}: {len(subset)} months < {MIN_HISTORY} required")
+        # Check span of the continuous series (after gap-filling) rather than
+        # raw row count, so a language with 24 sparse rows spanning 10 years
+        # is not mistakenly accepted as having 24 months of dense history.
+        if len(subset) >= 2:
+            ds_min = pd.to_datetime(subset["year_month"] + "-01").min()
+            ds_max = pd.to_datetime(subset["year_month"] + "-01").max()
+            span_months = (
+                (ds_max.year - ds_min.year) * 12 + (ds_max.month - ds_min.month) + 1
+            )
+        else:
+            span_months = len(subset)
+        if span_months < MIN_HISTORY:
+            print(f"  Skipping {lang}: {span_months} month span < {MIN_HISTORY} required")
             continue
         try:
             results.append(_forecast_one(lang, subset, ARIMACls))

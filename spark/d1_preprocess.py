@@ -66,9 +66,22 @@ def main() -> None:
     )
 
     # ── Join: one row per (repo, language, year_month) ─────────────────────────
-    # languages: one row per (repo, language)
-    # commits:   one row per (repo, year_month)
-    # Inner join produces the cross-product on shared repos
+    # languages: one row per (repo, language)  — static snapshot from Q1
+    # commits:   one row per (repo, year_month) — time series from Q2
+    # Inner join keeps only repos present in both tables.  Repos in commits
+    # but absent from the languages snapshot (e.g. deleted/renamed repos) are
+    # dropped; this is logged below so the data loss is visible at runtime.
+    langs_repos   = languages.select("repo_name").distinct()
+    commits_repos = commits.select("repo_name").distinct()
+
+    only_in_commits  = commits_repos.subtract(langs_repos).count()
+    only_in_langs    = langs_repos.subtract(commits_repos).count()
+    print(
+        f"d1_preprocess: join diagnostics — "
+        f"{only_in_commits:,} repos in commits only (dropped), "
+        f"{only_in_langs:,} repos in languages only (dropped)"
+    )
+
     joined = (
         languages.alias("l")
         .join(commits.alias("c"), on="repo_name", how="inner")

@@ -7,15 +7,20 @@
 --   "migrated from Flask to FastAPI"
 --   "replaced webpack with vite"
 --   "switching from Travis CI to GitHub Actions"
+--   "replace webpack with vite"           ← "replace X with Y" form
+--   "moved to Kubernetes"                 ← to_tech only (fallback pattern)
 --
 -- Regex strategy:
---   Pattern 1 captures the "from" technology in sentences like
---     "migrate from X ..."
---   Pattern 2 captures the "to" technology in sentences like
---     "... to Y" / "... with Y"
+--   from_tech — two independent patterns combined with COALESCE:
+--     P1: verb ... "from" X  (e.g. "migrate from Flask ...")
+--     P2: "replace/swap X with Y"  — X is the source (e.g. "replace webpack with vite")
+--   to_tech — two independent patterns combined with COALESCE:
+--     P1: same full verb set as from_tech + "to/with/into Y"
+--         (bug fix: old query used a narrower verb set, missing drop/remov/mov)
+--     P2: standalone "verb to Y" without an explicit "from" clause
 --
 -- Noise reduction:
---   - Both from_tech and to_tech must be non-null (HAVING clause)
+--   - Both from_tech and to_tech must be non-null
 --   - They must differ
 --   - Name length bounded to 2–30 characters
 --   - Minimum 5 commits per (from, to, year) triple
@@ -30,15 +35,31 @@
 WITH parsed AS (
     SELECT
         -- Extract the technology being migrated AWAY FROM
-        REGEXP_EXTRACT(
-            LOWER(message),
-            r'(?:migrat\w*|replac\w*|rewrite\w*|switch\w*|mov\w*|upgrad\w*|drop\w*|remov\w*)[^.\n]{0,60}?\bfrom\b\s+([\w][\w\-\.]{1,29})'
+        -- P1: "verb … from X"
+        -- P2: "replace/swap X with Y" — X is the source technology
+        COALESCE(
+            REGEXP_EXTRACT(
+                LOWER(message),
+                r'(?:migrat\w*|replac\w*|rewrite\w*|switch\w*|mov\w*|upgrad\w*|drop\w*|remov\w*)[^.\n]{0,60}?\bfrom\b\s+([\w][\w\-\.]{1,29})'
+            ),
+            REGEXP_EXTRACT(
+                LOWER(message),
+                r'\b(?:replac\w*|swap\w*)\s+([\w][\w\-\.]{1,29})\s+with\b'
+            )
         ) AS from_tech,
 
         -- Extract the technology being migrated TO
-        REGEXP_EXTRACT(
-            LOWER(message),
-            r'(?:migrat\w*|replac\w*|rewrite\w*|switch\w*|mov\w*|upgrad\w*)[^.\n]{0,60}?\b(?:to|with|into)\b\s+([\w][\w\-\.]{1,29})'
+        -- P1: full verb set (was missing drop/remov/mov in the original) + "to/with/into Y"
+        -- P2: standalone "verb to Y" — catches "switched to Kubernetes" without explicit "from"
+        COALESCE(
+            REGEXP_EXTRACT(
+                LOWER(message),
+                r'(?:migrat\w*|replac\w*|rewrite\w*|switch\w*|mov\w*|upgrad\w*|drop\w*|remov\w*)[^.\n]{0,60}?\b(?:to|with|into)\b\s+([\w][\w\-\.]{1,29})'
+            ),
+            REGEXP_EXTRACT(
+                LOWER(message),
+                r'\b(?:switch\w*|mov\w*|migrat\w*|upgrad\w*|rewrite\w*)\s+to\s+([\w][\w\-\.]{1,29})'
+            )
         ) AS to_tech,
 
         FORMAT_TIMESTAMP(
@@ -57,11 +78,11 @@ WITH parsed AS (
                 AND TIMESTAMP(
                     DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 1 DAY)
                 )
-        -- Pre-filter rows: only scan messages that contain migration keywords
-        -- This dramatically reduces the amount of regex work BigQuery must do
+        -- Pre-filter rows: only scan messages that contain migration keywords.
+        -- Extended to cover the "replace X with" pattern added above.
         AND REGEXP_CONTAINS(
             LOWER(message),
-            r'\b(?:migrat|replac|rewrite|switch.*\bto\b|mov.*\bto\b|upgrad)\b'
+            r'\b(?:migrat|replac|rewrite|switch\w*\s+to|mov\w*\s+to|upgrad|drop\w*\s+from|remov\w*\s+from|swap\w*\s+with)\b'
         )
 )
 
