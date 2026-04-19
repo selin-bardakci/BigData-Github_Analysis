@@ -1,0 +1,52 @@
+# =============================================================================
+# .gitignore
+# =============================================================================
+
+# --- GCP credentials (NEVER commit these) ---
+service-account-key.json
+*.json.key
+credentials/
+.env
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+.tox/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# --- Spark local temp ---
+derby.log
+metastore_db/
+spark-warehouse/
+
+# --- Outputs (large files — store in GCS instead) ---
+outputs/results/*.parquet
+outputs/results/*.csv
+
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- Logs ---
+*.log
