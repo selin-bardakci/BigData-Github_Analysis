@@ -33,11 +33,7 @@ WHERE
     type = 'PushEvent'
     AND repo.name IS NOT NULL
     AND repo.name != ''
-    AND _TABLE_SUFFIX BETWEEN '201501'
-        AND FORMAT_DATE(
-                '%Y%m',
-                DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 1 DAY)
-            )
+    AND _TABLE_SUFFIX BETWEEN '201501' AND '201710'
 GROUP BY
     repo_name,
     year_month
