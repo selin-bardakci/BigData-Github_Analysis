@@ -22,7 +22,7 @@ set -euo pipefail
 # CONFIG
 # =============================================================================
 PROJECT_ID="github-tech-trends"
-REGION="us-central1"
+REGION="us-east1"
 CLUSTER="spark-cluster"
 BUCKET="github-tech-trends-data"
 # =============================================================================

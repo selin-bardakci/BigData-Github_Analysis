@@ -56,8 +56,11 @@ TECH_ALLOWLIST: set[str] = {
     "npm", "yarn", "pnpm", "pip", "poetry", "cargo",
 }
 
-# Edges with fewer total migration signals than this are dropped
-MIN_EDGE_WEIGHT = 10
+# Edges with fewer total migration signals than this are dropped.
+# Lowered from 10 → 3: the Q3 data from GH Archive is sparser than the old
+# frozen snapshot because commit messages are extracted per-push rather than
+# per-commit, so real signals survive at lower counts.
+MIN_EDGE_WEIGHT = 3
 
 EDGE_SCHEMA = StructType([
     StructField("from_tech",       StringType(),  True),

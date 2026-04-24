@@ -41,9 +41,11 @@ from pyspark.sql.types import (
 )
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
-MIN_COMMITS_PER_EDGE = 2   # minimum commits for a dev→repo edge to be kept
-MIN_SHARED_REPOS     = 2   # minimum shared repos for a dev–dev edge
-TOP_N_DEVS           = 10_000   # reduced from 100k — keeps self-join manageable
+MIN_COMMITS_PER_EDGE  = 1    # minimum commits for a dev→repo edge to be kept
+MIN_SHARED_REPOS      = 1    # minimum shared repos for a dev–dev edge
+TOP_N_DEVS            = 25_000  # select by distinct repos, not total commits
+MAX_REPOS_PER_DEV     = 2_000  # devs with >2k repos are almost certainly bots
+MAX_DEVS_PER_REPO     = 200   # exclude megarepos (linux, tensorflow) from join to prevent explosion
 
 PAGERANK_SCHEMA = StructType([
     StructField("dev_id",       StringType(),  True),  # SHA-256 of email
@@ -108,25 +110,53 @@ def main() -> None:
         .filter(F.col("developer_email").isNotNull())
         .filter(F.col("developer_email") != "")
         .filter(F.col("commit_count") >= MIN_COMMITS_PER_EDGE)
+        # Cap at 2025: GH Archive export includes partial 2026 months
+        .filter(F.col("year") <= "2025")
         .withColumn("dev_id", sha256_udf(F.col("developer_email")))
         .drop("developer_email")   # raw email permanently removed
     )
 
-    # ── Select top-N developers by total commits ──────────────────────────────
-    top_devs = (
+    # ── Select top-N developers by distinct repos, not total commits ──────────
+    # Selecting by total commits biases toward CI bots that push thousands of
+    # commits to a single repo. Selecting by distinct repo count gives real
+    # contributors who collaborate across multiple projects.
+    dev_stats = (
         raw
         .groupBy("dev_id")
-        .agg(F.sum("commit_count").cast(IntegerType()).alias("total_commits"))
-        .orderBy(F.col("total_commits").desc())
+        .agg(
+            F.countDistinct("repo_name").cast(IntegerType()).alias("distinct_repos"),
+            F.sum("commit_count").cast(IntegerType()).alias("total_commits"),
+        )
+        # Hard bot ceiling: >5k distinct repos is automation (package mirrors, forks)
+        .filter(F.col("distinct_repos") <= MAX_REPOS_PER_DEV)
+        # Require at least 2 repos to filter one-shot drive-by commits
+        .filter(F.col("distinct_repos") >= 2)
+    )
+
+    top_devs = (
+        dev_stats
+        .orderBy(F.col("distinct_repos").desc())
         .limit(top_n)
     )
 
-    hashed = raw.join(top_devs.select("dev_id"), on="dev_id", how="inner")
+    hashed = raw.join(top_devs.select("dev_id", "total_commits"), on="dev_id", how="inner")
 
     # ── Build dev–dev co-contributor edges via self-join ──────────────────────
     # Two developers are connected if they both committed to the same repo
     # in the same year.  We use (dev_a < dev_b) to deduplicate undirected pairs.
-    dev_repo = hashed.select("dev_id", "repo_name", "year").distinct()
+    # Exclude megarepos (>MAX_DEVS_PER_REPO contributors) — joining on linux or
+    # tensorflow would explode: N*(N-1)/2 pairs for N=10k is 50M rows.
+    dev_repo_raw = hashed.select("dev_id", "repo_name", "year").distinct()
+
+    repo_dev_counts = (
+        dev_repo_raw.groupBy("repo_name")
+        .agg(F.countDistinct("dev_id").alias("repo_dev_count"))
+        .filter(F.col("repo_dev_count") <= MAX_DEVS_PER_REPO)
+    )
+
+    dev_repo = dev_repo_raw.join(
+        repo_dev_counts.select("repo_name"), on="repo_name", how="inner"
+    )
 
     dev_dev = (
         dev_repo.alias("a")
@@ -141,7 +171,7 @@ def main() -> None:
     )
 
     dev_dev_pd:    pd.DataFrame = dev_dev.toPandas()
-    top_devs_pd:   pd.DataFrame = top_devs.toPandas()
+    top_devs_pd:   pd.DataFrame = top_devs.select("dev_id", "total_commits").toPandas()
 
     print(
         f"d4d5_developer_graph: {len(top_devs_pd):,} developers, "
@@ -167,11 +197,16 @@ def main() -> None:
 
     print(f"d4d5_developer_graph: igraph — {G.vcount():,} vertices, {G.ecount():,} edges")
 
-    # ── D4: PageRank + HITS ───────────────────────────────────────────────────
-    pagerank_scores = G.pagerank(weights="weight", damping=0.85)
-    hub_scores      = G.hub_score(weights="weight", return_eigenvalue=False)
-    auth_scores     = G.authority_score(weights="weight", return_eigenvalue=False)
-    degrees         = G.degree()
+    # ── D4: PageRank + betweenness centrality ────────────────────────────────
+    # HITS hub/authority scores are mathematically identical on undirected graphs
+    # (hub_score == authority_score always). Replaced with betweenness centrality
+    # which meaningfully measures bridge nodes in an undirected co-contributor graph.
+    pagerank_scores     = G.pagerank(weights="weight", damping=0.85)
+    raw_betweenness     = G.betweenness(weights="weight", directed=False)
+    n                   = G.vcount()
+    denom               = (n - 1) * (n - 2) / 2 if n > 2 else 1.0
+    betweenness_scores  = [b / denom for b in raw_betweenness]
+    degrees             = G.degree()
 
     dev_to_commits = top_devs_pd.set_index("dev_id")["total_commits"].to_dict()
 
@@ -179,8 +214,8 @@ def main() -> None:
         (
             dev,
             float(pagerank_scores[i]),
-            float(hub_scores[i]),
-            float(auth_scores[i]),
+            float(betweenness_scores[i]),   # hub_score slot → betweenness
+            float(betweenness_scores[i]),   # auth_score slot → betweenness (schema compat)
             int(degrees[i]),
             int(dev_to_commits.get(dev, 0)),
         )

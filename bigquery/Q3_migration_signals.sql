@@ -2,33 +2,21 @@
 -- Q3 — Technology Migration Signals from Commit Messages
 -- Deliverable: D3 (Technology Migration Graph)
 --
--- SOURCE CHANGE: was bigquery-public-data.github_repos.commits (frozen 2015
--- snapshot — missed all modern migrations: GitHub Actions, FastAPI, Kubernetes,
--- TypeScript, pnpm, Vite, Rust ecosystem shifts, etc.)
--- Now uses githubarchive.month.* which has commit messages from 2015 to today.
+-- Scans commit messages inside PushEvent payloads for "migrating from X to Y"
+-- patterns, extracting (from_tech, to_tech, year, migration_count) rows.
 --
--- Commit messages live inside the PushEvent JSON payload:
---   payload → $.commits[] → $.message
--- Extracted using JSON_EXTRACT_ARRAY + UNNEST + JSON_EXTRACT_SCALAR,
--- confirmed working pattern against githubarchive BigQuery tables.
+-- Cost control — sampled scan:
+--   Full scan (all months 2015-2025) costs ~31 TB — exceeds free tier.
+--   This version samples April, August and December of each year
+--   (3 months × 11 years = 33 table shards instead of 132), reducing scan to
+--   ~7.5 TB while preserving year-level trend resolution.
+--   Counts are raw per-month; the Spark D3 job aggregates across years.
 --
--- Regex strategy (same improved patterns as before):
---   from_tech — COALESCE of two patterns:
---     P1: "verb … from X"
---     P2: "replace/swap X with Y" — X is the source
---   to_tech — COALESCE of two patterns:
---     P1: full verb set + "to/with/into Y"
---     P2: standalone "verb to Y"
+-- Regex strategy (same improved patterns):
+--   from_tech — "verb … from X"  OR  "replace/swap X with Y"
+--   to_tech   — "verb … to/with/into Y"  OR  standalone "verb to Y"
 --
--- Noise reduction:
---   - payload pre-filter before JSON unnesting (cost saving)
---   - message-level regex filter after unnesting
---   - Both endpoints must be non-null and differ
---   - Name length 2–30 chars
---   - Minimum 5 commits per (from, to, year) triple
---   - Technology allowlist applied in Spark d3_migration_graph.py
---
--- Estimated scan: ~500 GB – 1 TB (payload column across all months)
+-- Estimated scan: ~7-8 TB  (sampled months only)
 -- Run once, save as staging.migration_signals, export to GCS.
 -- =============================================================================
 
@@ -42,9 +30,21 @@ WITH raw_messages AS (
     WHERE
         type    = 'PushEvent'
         AND payload IS NOT NULL
-        AND _TABLE_SUFFIX BETWEEN '201501' AND FORMAT_DATE('%Y%m', DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH))
-        -- Pre-filter on raw payload string BEFORE JSON unnesting to reduce cost.
-        -- Drops PushEvents whose entire payload contains no migration keywords.
+        -- Sample: April, August, December of each year 2015-2025
+        AND _TABLE_SUFFIX IN (
+            '201504','201508','201512',
+            '201604','201608','201612',
+            '201704','201708','201712',
+            '201804','201808','201812',
+            '201904','201908','201912',
+            '202004','202008','202012',
+            '202104','202108','202112',
+            '202204','202208','202212',
+            '202304','202308','202312',
+            '202404','202408','202412',
+            '202504','202508','202512'
+        )
+        -- Pre-filter: drop events whose payload has no migration keywords at all
         AND REGEXP_CONTAINS(
             LOWER(payload),
             r'\b(?:migrat|replac|rewrite|switch|upgrad|drop|remov|swap)\b'
@@ -53,23 +53,19 @@ WITH raw_messages AS (
 
 parsed AS (
     SELECT
-        -- from_tech: technology being replaced / migrated away from
         COALESCE(
             REGEXP_EXTRACT(LOWER(message),
                 r'(?:migrat\w*|replac\w*|rewrite\w*|switch\w*|mov\w*|upgrad\w*|drop\w*|remov\w*)[^.\n]{0,60}?\bfrom\b\s+([\w][\w\-\.]{1,29})'
             ),
-            -- "replace/swap X with Y" form — X is the source
             REGEXP_EXTRACT(LOWER(message),
                 r'\b(?:replac\w*|swap\w*)\s+([\w][\w\-\.]{1,29})\s+with\b'
             )
         ) AS from_tech,
 
-        -- to_tech: technology being adopted
         COALESCE(
             REGEXP_EXTRACT(LOWER(message),
                 r'(?:migrat\w*|replac\w*|rewrite\w*|switch\w*|mov\w*|upgrad\w*|drop\w*|remov\w*)[^.\n]{0,60}?\b(?:to|with|into)\b\s+([\w][\w\-\.]{1,29})'
             ),
-            -- standalone "verb to Y" — catches "moved to Kubernetes" without "from"
             REGEXP_EXTRACT(LOWER(message),
                 r'\b(?:switch\w*|mov\w*|migrat\w*|upgrad\w*|rewrite\w*)\s+to\s+([\w][\w\-\.]{1,29})'
             )
@@ -80,7 +76,6 @@ parsed AS (
     FROM raw_messages
     WHERE
         message IS NOT NULL
-        -- Second-pass filter on the message itself after unnesting
         AND REGEXP_CONTAINS(
             LOWER(message),
             r'\b(?:migrat|replac|rewrite|switch\w*\s+to|mov\w*\s+to|upgrad|drop\w*\s+from|remov\w*\s+from|swap\w*\s+with)\b'
@@ -102,11 +97,7 @@ WHERE
 GROUP BY
     from_tech, to_tech, year
 HAVING
-    migration_count >= 5
+    migration_count >= 2
+
 ORDER BY
     migration_count DESC
-
--- =============================================================================
--- Cost-check: uncomment before first full run
--- LIMIT 50000
--- =============================================================================
