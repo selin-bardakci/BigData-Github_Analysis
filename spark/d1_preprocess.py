@@ -75,14 +75,15 @@ def main() -> None:
     )
 
     # ── Q2: monthly push counts (GH Archive) ──────────────────────────────────
-    # Cap at 2025-12: GH Archive is live so the export contains partial 2026
-    # months. Q1 (HF dataset) only covers repos created through July 2025, so
-    # 2026 rows are both incomplete and outside the analysis window.
+    # Cap at 2025-06: the HF language dataset covers repos created through
+    # 2025-07-23. Repos created after that fall out of the inner join (no
+    # language label), causing an artificial decline from 2025-08 onward.
+    # 2025-06 gives 10.5 years of clean, complete data for training/forecasting.
     commits = (
         spark.read.parquet(f"gs://{bucket}/raw/commits/")
         .filter(F.col("year_month").isNotNull())
         .filter(F.col("commit_count").cast(LongType()) > 0)
-        .filter(F.col("year_month") <= "2025-12")
+        .filter(F.col("year_month") <= "2025-06")
     )
 
     # ── Join diagnostics ──────────────────────────────────────────────────────

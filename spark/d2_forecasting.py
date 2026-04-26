@@ -32,10 +32,9 @@ from pyspark.sql.types import (
     BooleanType, DoubleType, StringType, StructField, StructType,
 )
 
-TOP_N        = 30   # number of languages to forecast
+TOP_N           = 30   # number of languages to forecast
 FORECAST_MONTHS = 24
-ARIMA_ORDER  = (2, 1, 2)
-MIN_HISTORY  = 24   # months; skip languages with less data
+MIN_HISTORY     = 36   # Holt-Winters needs at least 3 full seasonal cycles (3×12)
 
 FORECAST_SCHEMA = StructType([
     StructField("language",      StringType(),  True),
@@ -59,9 +58,17 @@ def _ensure_module(module_name: str, pip_spec: str):
         return importlib.import_module(module_name)
 
 
-def _forecast_one(lang: str, df_lang: pd.DataFrame, ARIMACls) -> pd.DataFrame:
+def _forecast_one(lang: str, df_lang: pd.DataFrame, ETSCls) -> pd.DataFrame:
     """
-    Fit ARIMA for a single language and return historical + forward forecast rows.
+    Fit Holt-Winters Exponential Smoothing for a single language and return
+    historical + forward forecast rows.
+
+    Model: additive trend (damped) + additive 12-month seasonality.
+    Damped trend prevents the straight-line over-extrapolation that naive
+    additive Holt-Winters produces; it bends the trend gradually toward flat
+    while still projecting directional momentum — appropriate for technology
+    adoption curves that slow as they mature.
+
     Prophet columns are included as NaN for notebook compatibility.
     """
     warnings.filterwarnings("ignore")
@@ -70,9 +77,6 @@ def _forecast_one(lang: str, df_lang: pd.DataFrame, ARIMACls) -> pd.DataFrame:
     df_lang["ds"] = pd.to_datetime(df_lang["year_month"] + "-01")
 
     # ── Fill gaps: reindex to a continuous monthly series ────────────────────
-    # ARIMA(p,d,q) assumes equally-spaced observations. Sparse data (months
-    # with no activity produce no row in d1_monthly) must be filled before
-    # fitting or the model treats adjacent rows as consecutive when they are not.
     full_range = pd.date_range(
         start=df_lang["ds"].min(), end=df_lang["ds"].max(), freq="MS"
     )
@@ -86,21 +90,31 @@ def _forecast_one(lang: str, df_lang: pd.DataFrame, ARIMACls) -> pd.DataFrame:
         .reset_index()
     )
     df_lang["year_month"] = df_lang["ds"].dt.strftime("%Y-%m")
-    # Linear interpolation for interior gaps; edge NaNs (shouldn't exist after
-    # reindex between min/max) are filled with 0 as a safe fallback.
     df_lang["repo_count"] = (
         df_lang["repo_count"].interpolate(method="linear").fillna(0)
     )
 
     y = df_lang["repo_count"].astype(float).values
+    # Clip to positive — ETS with additive components can receive zeros but
+    # log-transform variants require strictly positive values.
+    y = np.clip(y, 1.0, None)
 
-    # ── ARIMA ─────────────────────────────────────────────────────────────────
+    # ── Holt-Winters (ETS: additive damped trend + additive seasonality) ──────
     try:
-        model    = ARIMACls(y, order=ARIMA_ORDER).fit()
-        arima_fc = model.forecast(steps=FORECAST_MONTHS)
+        model   = ETSCls(
+            y,
+            trend="add",
+            damped_trend=True,   # prevents unrealistic straight-line extrapolation
+            seasonal="add",
+            seasonal_periods=12, # yearly cycle in monthly data
+            initialization_method="estimated",
+        )
+        fit      = model.fit(optimized=True, remove_bias=True)
+        hw_fc    = fit.forecast(FORECAST_MONTHS)
+        hw_fc    = np.clip(hw_fc, 0.0, None)  # forecasts can't be negative repo counts
     except Exception as exc:
-        print(f"  ARIMA fit failed for {lang}: {exc}")
-        arima_fc = np.full(FORECAST_MONTHS, np.nan)
+        print(f"  Holt-Winters fit failed for {lang}: {exc}")
+        hw_fc = np.full(FORECAST_MONTHS, np.nan)
 
     # ── Forecast dates ────────────────────────────────────────────────────────
     last_date    = df_lang["ds"].iloc[-1]
@@ -127,7 +141,7 @@ def _forecast_one(lang: str, df_lang: pd.DataFrame, ARIMACls) -> pd.DataFrame:
         "prophet_yhat":  np.nan,
         "prophet_lower": np.nan,
         "prophet_upper": np.nan,
-        "arima_yhat":    arima_fc,
+        "arima_yhat":    hw_fc,   # column kept as arima_yhat for schema compat
         "is_forecast":   True,
     })
 
@@ -154,7 +168,7 @@ def main() -> None:
     spark.sparkContext.setLogLevel("WARN")
 
     # Install statsmodels if missing (Prophet is not used in this Spark job).
-    ARIMACls = _ensure_module("statsmodels.tsa.arima.model", "statsmodels==0.14.2").ARIMA
+    ETSCls = _ensure_module("statsmodels.tsa.holtwinters", "statsmodels==0.14.2").ExponentialSmoothing
 
     df = spark.read.parquet(f"gs://{bucket}/processed/d1_monthly/")
 
@@ -195,7 +209,7 @@ def main() -> None:
             print(f"  Skipping {lang}: {span_months} month span < {MIN_HISTORY} required")
             continue
         try:
-            results.append(_forecast_one(lang, subset, ARIMACls))
+            results.append(_forecast_one(lang, subset, ETSCls))
             print(f"  OK: {lang} ({len(subset)} months history)")
         except Exception as exc:
             print(f"  ERROR: {lang} — {exc}")
