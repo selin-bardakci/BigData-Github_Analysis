@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body {
+    background:
+      radial-gradient(1100px 600px at 80% -10%, rgba(167,139,250,0.10), transparent 60%),
+      radial-gradient(900px 500px at -10% 90%, rgba(94,234,212,0.08), transparent 60%),
+      #0B0E14;
+  }
+  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar-thumb { background: #2A3344; border-radius: 4px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+}
+
+@layer components {
+  .card {
+    @apply bg-card/80 backdrop-blur-sm border border-border rounded-2xl;
+  }
+  .card-pad { @apply p-5 md:p-6; }
+  .chip {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full
+           text-xs font-medium border border-border bg-surface
+           text-sub hover:text-ink hover:border-mute transition-colors
+           cursor-pointer select-none;
+  }
+  .chip-active {
+    @apply text-ink border-transparent shadow-glow;
+  }
+  .stat-num {
+    @apply font-mono text-3xl md:text-4xl font-semibold text-ink tracking-tight;
+  }
+  .label {
+    @apply text-xs uppercase tracking-[0.14em] text-sub font-medium;
+  }
+  .btn {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium
+           border border-border bg-surface text-ink hover:border-mute
+           transition-colors;
+  }
+  .btn-primary {
+    @apply bg-accent/15 border-accent/40 text-accent hover:bg-accent/20;
+  }
+  .divider { @apply h-px bg-border w-full; }
+}
